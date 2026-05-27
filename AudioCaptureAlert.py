@@ -15,6 +15,9 @@ from types import SimpleNamespace
 from ctypes import *
 from ctypes.util import find_library
 import math
+import subprocess
+import platform
+import threading
 
 # Load the OBS library
 obsffi = CDLL(find_library("obs"))
@@ -76,6 +79,56 @@ G.last_log_time = 0  # Last time the log file was written
 G.plugin_enabled = False  # Plugin disabled by default
 G.enable_only_active = False  # Only enable when streaming/recording
 G.event_logging = True  # Event logging enabled by default
+G.notification_message = "Microphone is silent!"  # Default notification message
+G.notification_icon = ""  # Optional path to notification icon
+G.alert_sent = False  # Tracks whether the silence alert notification has been sent
+
+def send_notification(title, message, icon_path=""):
+    """Send a desktop notification cross-platform, non-blocking."""
+    def _notify():
+        system = platform.system()
+        try:
+            if system == "Linux":
+                cmd = ["notify-send", title, message]
+                if icon_path:
+                    cmd += ["-i", icon_path]
+                subprocess.Popen(cmd)
+            elif system == "Windows":
+                if icon_path:
+                    image_xml = f'<image placement="appLogoOverride" src="{icon_path}"/>'
+                else:
+                    image_xml = ""
+                ps_script = f"""
+$xml = @"
+<toast>
+  <visual>
+    <binding template="ToastGeneric">
+      {image_xml}
+      <text>{title}</text>
+      <text>{message}</text>
+    </binding>
+  </visual>
+</toast>
+"@
+[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]|Out-Null
+[Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom,ContentType=WindowsRuntime]|Out-Null
+$doc = New-Object Windows.Data.Xml.Dom.XmlDocument
+$doc.LoadXml($xml)
+$toast = New-Object Windows.UI.Notifications.ToastNotification $doc
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("OBS Studio").Show($toast)
+"""
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            elif system == "Darwin":
+                # macOS does not support custom icons via osascript
+                script = f'display notification "{message}" with title "{title}"'
+                subprocess.Popen(["osascript", "-e", script])
+        except Exception as e:
+            print(f"[AudioCaptureAlert] Notification error: {e}")
+
+    threading.Thread(target=_notify, daemon=True).start()
 
 class _Functions:
     def __init__(self, source_name=None):
@@ -153,8 +206,14 @@ def event_loop():
             if G.silence_duration >= G.silence_threshold:
                 if G.event_logging:
                     print(f"Silence detected for {G.silence_threshold} seconds. Enabling image source.")
+                if not G.alert_sent:
+                    send_notification("OBS Audio Alert", G.notification_message, G.notification_icon)
+                    G.alert_sent = True
                 enable_source(True)
         else:
+            if G.alert_sent:
+                send_notification("OBS Audio Alert", "Microphone audio restored.", G.notification_icon)
+                G.alert_sent = False
             G.silence_duration = 0
             enable_source(False)
         # Write to log file every tick interval
@@ -188,6 +247,7 @@ def script_unload():
 def script_defaults(settings):
     obs.obs_data_set_default_int(settings, "tick_interval", 10)  # Default to 10 seconds
     obs.obs_data_set_default_int(settings, "silence_threshold", 60)  # Default to 60 seconds
+    obs.obs_data_set_default_string(settings, "notification_message", "Microphone is silent!")
 
 def script_properties():
     props = obs.obs_properties_create()
@@ -195,6 +255,7 @@ def script_properties():
     # Audio Capture Source Section
     mic_list = obs.obs_properties_add_list(props, "mic_source_name", "Audio Capture Source",
         obs.OBS_COMBO_TYPE_LIST, obs.OBS_COMBO_FORMAT_STRING)
+    obs.obs_property_list_add_string(mic_list, "Select an Audio Source", "")
     obs.obs_properties_add_text(props, "mic_source_help", 
         "Select the audio input device to monitor for silence.\nThis should be your microphone or audio capture source.",
         obs.OBS_TEXT_INFO)
@@ -240,7 +301,19 @@ def script_properties():
     obs.obs_properties_add_text(props, "event_logging_help",
         "Enable detailed logging of plugin events to the OBS log file.\nUseful for debugging but may impact performance.",
         obs.OBS_TEXT_INFO)
-    obs.obs_properties_add_text(props, "sep6", "──────────────────────────────", obs.OBS_TEXT_INFO)
+    obs.obs_properties_add_text(props, "sep7", "──────────────────────────────", obs.OBS_TEXT_INFO)
+
+    # Notification Section
+    obs.obs_properties_add_text(props, "notification_message", "Silence Alert Message", obs.OBS_TEXT_DEFAULT)
+    obs.obs_properties_add_text(props, "notification_message_help",
+        "Message shown in the desktop notification when silence is detected.",
+        obs.OBS_TEXT_INFO)
+    obs.obs_properties_add_path(props, "notification_icon", "Notification Icon (optional)",
+        obs.OBS_PATH_FILE, "Images (*.png *.jpg *.ico *.bmp)", "")
+    obs.obs_properties_add_text(props, "notification_icon_help",
+        "Optional icon shown in the desktop notification.\nSupported on Linux and Windows. Leave blank to use none.",
+        obs.OBS_TEXT_INFO)
+    obs.obs_properties_add_text(props, "sep8", "──────────────────────────────", obs.OBS_TEXT_INFO)
 
     # Populate dropdowns with available sources
     sources = obs.obs_enum_sources()
@@ -302,10 +375,13 @@ def script_update(settings):
     G.plugin_enabled = obs.obs_data_get_bool(settings, "plugin_enabled")
     G.enable_only_active = obs.obs_data_get_bool(settings, "enable_only_active")
     G.event_logging = obs.obs_data_get_bool(settings, "event_logging")
+    G.notification_message = obs.obs_data_get_string(settings, "notification_message") or "Microphone is silent!"
+    G.notification_icon = obs.obs_data_get_string(settings, "notification_icon") or ""
     
     # Reset silence duration if plugin enabled state changed
     if prev_plugin_enabled != G.plugin_enabled or prev_enable_only_active != G.enable_only_active:
         G.silence_duration = 0
+        G.alert_sent = False
         if G.event_logging:
             print("Reset silence duration due to plugin state change")
     
