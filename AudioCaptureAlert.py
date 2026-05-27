@@ -249,14 +249,15 @@ def script_properties():
             source_id = obs.obs_source_get_id(source)
             name = obs.obs_source_get_name(source)
             # Add audio and video sources to the audio capture dropdown
-            if source_id in ["wasapi_input_capture", "wasapi_output_capture", "coreaudio_input_capture", "dshow_input"]:
+            if source_id in ["wasapi_input_capture", "wasapi_output_capture", "coreaudio_input_capture", "dshow_input",
+                             "pulse_input_capture", "pulse_output_capture", "alsa_input_capture", "jack_output_capture"]:
                 obs.obs_property_list_add_string(mic_list, name, name)
             # Add image, media and video sources to combined dropdown
             if source_id == "image_source":  # OBS image source ID
                 obs.obs_property_list_add_string(source_list, f"Image: {name}", f"Image: {name}")
             elif source_id == "ffmpeg_source":  # OBS media source ID
                 obs.obs_property_list_add_string(source_list, f"Media: {name}", f"Media: {name}")
-            elif source_id == "dshow_input":  # OBS video capture device ID
+            elif source_id in ["dshow_input", "v4l2_input"]:  # OBS video capture device ID (Windows/Linux)
                 obs.obs_property_list_add_string(source_list, f"Video: {name}", f"Video: {name}")
         obs.source_list_release(sources)
     return props
